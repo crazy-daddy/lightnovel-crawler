@@ -24,15 +24,34 @@ class NovelPhoenixCrawler(SoupTemplate):
         self, tag: PageSoup, novel: Novel, volume: Optional[Volume] = None
     ) -> Iterable[PageSoup]:
         # The novel page links only the newest chapter; the list lives one level down.
-        url = self.absolute_url(novel.url).split("?")[0].rstrip("/") + "/chapters"
-        # That list holds 100 rows per page; the rest sit behind the pager's `rel=next` link.
-        seen = set()
-        while url and url not in seen:
-            seen.add(url)
-            soup = self.scraper.get_soup(url)
-            yield from soup.select("ul.chapter-list li a[href]")
-            next_page = soup.select_one("a[rel='next'][href]")
-            url = self.absolute_url(next_page["href"]) if next_page else ""
+        list_url = self.absolute_url(novel.url).split("?")[0].rstrip("/") + "/chapters"
+        # That list holds 100 rows per page. Follow the pager's `rel=next` link, or guess
+        # `?page=N` when there is none, and stop at the first page that adds no new chapter:
+        # a site that ignores the parameter serves page one again rather than an error.
+        url, page = list_url, 1
+        seen_pages, seen_links = set(), set()
+        while url and url not in seen_pages:
+            seen_pages.add(url)
+            try:
+                soup = self.scraper.get_soup(url)
+            except Exception as e:
+                if page == 1:
+                    raise
+                logger.debug("Chapter list page %d failed: %s", page, e)
+                break
+            fresh = [
+                a
+                for a in soup.select("ul.chapter-list li a[href]")
+                if self.absolute_url(a["href"]) not in seen_links
+            ]
+            if not fresh:
+                break
+            for a in fresh:
+                seen_links.add(self.absolute_url(a["href"]))
+                yield a
+            page += 1
+            next_link = soup.select_one("a[rel='next'][href]")
+            url = self.absolute_url(next_link["href"]) if next_link else f"{list_url}?page={page}"
 
     def parse_chapter_title(self, soup: PageSoup, chapter: Chapter) -> None:
         # A row runs number, title and timestamp together with no separators between the
